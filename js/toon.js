@@ -1,15 +1,16 @@
-define(function (require) {
+define(["easel","sugar-web/datastore","sugar-web/env","webL10n"], function (easel, datastore, env, l10n) {
 
-    require("easel");
 
-    require("canvasToBlob");
+	env.getEnvironment(function(err, environment) {
+		var defaultLanguage = (typeof chrome != 'undefined' && chrome.app && chrome.app.runtime) ? chrome.i18n.getUILanguage() : navigator.language;
+		var language = environment.user ? environment.user.language : defaultLanguage;
+		l10n.language.code = language;
+		console.log('LANG ' + language);
+	});
 
-    var localizationData = require("localizationData");
-    var lang = navigator.language.substr(0, 2);
-
-    function _(text) {
+	function _(text) {
         // copied from activity.js
-        translation = localizationData[lang][text];
+        translation = l10n.get(text);
         if (translation == '') {
             translation = text;
         };
@@ -254,10 +255,12 @@ define(function (require) {
             previewCanvas.width = this._canvas.width;
             previewCanvas.height = this._canvas.height;
             var previewComicBox = new ComicBox(previewCanvas);
+			var that = this;
             previewComicBox.init(this._data['boxs'][boxOrder],
-                                 this._data['images'], false);
-            this._data['previews'][boxOrder] =
-                previewCanvas.toDataURL("image/png");
+                                 this._data['images'], false, {canvas: previewCanvas, order: boxOrder}, function(context) {
+            	that._data['previews'][context.order] =
+                	context.canvas.toDataURL("image/png");
+			});
         };
 
         this._updatePageCounter = function() {
@@ -331,7 +334,7 @@ define(function (require) {
             this._updatePageCounter();
         };
 
-        this.saveAsImage = function(columns, callback) {
+        this.saveAsImage = function(columns) {
             /* columns can be '0', '1', or '2'
                if '0' means show the images in a single row */
             this.showWait();
@@ -352,62 +355,61 @@ define(function (require) {
             var imageCanvas = document.createElement('canvas');
             imageCanvas.width = width;
             imageCanvas.height = height;
-            var imageStage = new createjs.Stage(imageCanvas);
+			var ctx = imageCanvas.getContext("2d");
 
             // add a white background
-            var background = new createjs.Shape();
-            background.graphics.beginFill(
-                "#fff").drawRect(0, 0, width, height);
-            imageStage.addChild(background);
+			ctx.fillStyle="#FFFFFF";
+			ctx.fillRect(0, 0, width, height);
 
+			var currentbox = 0;
             for (var i = 0; i < cantBoxes; i++) {
                 // load the bix image in a temp canvas
+				var that = this;
                 var tmpCanvas = document.createElement('canvas');
                 tmpCanvas.width = this._canvas.width;
                 tmpCanvas.height = this._canvas.height;
                 var tmpComicBox = new ComicBox(tmpCanvas);
                 tmpComicBox.init(this._data['boxs'][i],
-                                 this._data['images'], false);
+                                 this._data['images'], false, tmpCanvas, function(mycanvas) {
 
-                // calculate coordinates
-                if (columns == '0') {
-                    var x = MARGIN + (this._canvas.width + MARGIN) * i;
-                    var y = MARGIN;
-                } else if (columns == '1') {
-                    var x = MARGIN;
-                    var y = MARGIN + (this._canvas.height + MARGIN) * i;
-                } else if (columns == '2') {
-                    var x = MARGIN + (i % 2) * (this._canvas.width + MARGIN);
-                    var y = MARGIN + Math.floor(i / 2) * (this._canvas.height + MARGIN);
-                };
+					// add to the image canvas
+	                var img = new Image();
+					img.src = mycanvas.toDataURL("image/png");
+	 				img.addEventListener("load", function() {
+	 	                // calculate coordinates
+	 	                if (columns == '0') {
+	 	                    var x = MARGIN + (that._canvas.width + MARGIN) * currentbox;
+	 	                    var y = MARGIN;
+	 	                } else if (columns == '1') {
+	 	                    var x = MARGIN;
+	 	                    var y = MARGIN + (that._canvas.height + MARGIN) * currentbox;
+	 	                } else if (columns == '2') {
+	 	                    var x = MARGIN + (currentbox % 2) * (that._canvas.width + MARGIN);
+	 	                    var y = MARGIN + Math.floor(currentbox / 2) * (that._canvas.height + MARGIN);
+	 	                };
 
-                // add to the image canvas
-                var img = new Image();
-                img.src = tmpCanvas.toDataURL("image/png");
-                bitmap = new createjs.Bitmap(img);
-                bitmap.setBounds(0, 0, img.width, img.height);
-                // calculate scale
-                bitmap.mouseEnabled = false;
-                bitmap.x = x;
-                bitmap.y = y;
-                imageStage.addChild(bitmap);
+	 	                // draw image
+						ctx.drawImage(this, x, y);
+
+	 					if (currentbox++ >= cantBoxes-1) {
+	 						// save in datastore
+							var imgAsDataURL = imageCanvas.toDataURL("image/png");
+	 						var metadata = {
+	 							mimetype: "image/png",
+	 							title: "Image FotoToon",
+	 							activity: "org.olpcfrance.MediaViewerActivity",
+	 							timestamp: new Date().getTime(),
+	 							creation_time: new Date().getTime(),
+	 							file_size: 0
+	 						};
+	 						datastore.create(metadata, function() {
+	 							console.log("image saved in journal.");
+	 							that.hideWait();
+	 						}, imgAsDataURL);
+	 					}
+	 				});
+				});
             };
-            imageStage.update();
-            if (callback != null) {
-                imageCanvas.toBlob(callback);
-            } else {
-                // use cordova plugin from
-                // https://github.com/devgeeks/Canvas2ImagePlugin
-                window.canvas2ImagePlugin.saveImageDataToLibrary(
-                    function(msg){
-                        console.log(msg);
-                    },
-                    function(err){
-                        console.log(err);
-                    },
-                    imageCanvas);
-            };
-            this.hideWait();
         };
 
     };
@@ -431,7 +433,7 @@ define(function (require) {
         // reference to the text palette used to edit the text in the globes
         this._textpalette = null;
 
-        this.init = function (data, imagesData, canRemove) {
+        this.init = function (data, imagesData, canRemove, context, callback) {
             this._data = data;
             this.imagesData = imagesData
             this.canRemove = canRemove;
@@ -459,7 +461,7 @@ define(function (require) {
 
                     if (this.imagesData != null) {
                         this._setBackgroundImageDataUrl(
-                            this.imagesData[this._image_name]);
+                            this.imagesData[this._image_name], context, callback);
                     };
                 } else {
                     this._image_x = 0;
@@ -469,54 +471,60 @@ define(function (require) {
                     this._image_name = '';
                     this._slideshow_duration = 10;
                     this.createGlobes();
+					if (callback) callback(context);
                 };
             };
             this.stage.update();
         };
 
-        this._setBackgroundImageDataUrl = function(imageUrl) {
+        this._setBackgroundImageDataUrl = function(imageUrl, context, callback) {
             this._image_x = 0;
             this._image_y = 0;
             this._image_width = this._width;
             this._image_height = this._height;
             var img = new Image();
+			var that = this;
+			img.addEventListener("load", function() {
+				bitmap = new createjs.Bitmap(img);
+	            bitmap.setBounds(0, 0, img.width, img.height);
+	            // calculate scale
+	            var scale_x = that._width / img.width;
+	            var scale_y = that._height / img.height;
+	            var scale = Math.min(scale_x, scale_y);
+
+	            bitmap.mouseEnabled = false;
+	            bitmap.x = LINE_WIDTH;
+	            bitmap.y = LINE_WIDTH;
+	            bitmap.scaleX = scale;
+	            bitmap.scaleY = scale;
+	            that._backContainer.addChildAt(bitmap, 0);
+
+	            // add a trash button
+	            if (that.canRemove) {
+	                createAsyncBitmapButton(that, './icons/remove.svg',
+	                    function(comicBox, button) {
+	                        button.x = 0;
+	                        button.y = comicBox._height - button.height;
+	                        button.visible = true;
+	                        comicBox._removeButton = button;
+	                        comicBox._backContainer.addChildAt(button, 1);
+	                        comicBox._backContainer.updateCache();
+
+	                        button.on('click', function(event) {
+	                            comicBox.remove();
+	                        });
+
+	                        comicBox.createGlobes();
+	                    });
+	            } else {
+	                that._backContainer.updateCache();
+	                that.createGlobes();
+	            };
+				if (callback) {
+					callback(context);
+				}
+			});
             img.src = imageUrl;
-            bitmap = new createjs.Bitmap(img);
-            bitmap.setBounds(0, 0, img.width, img.height);
-            // calculate scale
-            var scale_x = this._width / img.width;
-            var scale_y = this._height / img.height;
-            var scale = Math.min(scale_x, scale_y);
-
-            bitmap.mouseEnabled = false;
-            bitmap.x = LINE_WIDTH;
-            bitmap.y = LINE_WIDTH;
-            bitmap.scaleX = scale;
-            bitmap.scaleY = scale;
-            this._backContainer.addChildAt(bitmap, 0);
-
-            // add a trash button
-            if (this.canRemove) {
-                createAsyncBitmapButton(this, './icons/remove.svg',
-                    function(comicBox, button) {
-                        button.x = 0;
-                        button.y = comicBox._height - button.height;
-                        button.visible = true;
-                        comicBox._removeButton = button;
-                        comicBox._backContainer.addChildAt(button, 1);
-                        comicBox._backContainer.updateCache();
-
-                        button.on('click', function(event) {
-                            comicBox.remove();
-                        });
-
-                        comicBox.createGlobes();
-                    });
-            } else {
-                this._backContainer.updateCache();
-                this.createGlobes();
-            };
-
         };
 
         this.remove  = function() {
@@ -1575,6 +1583,8 @@ define(function (require) {
                 if (imageData != undefined) {
                     this._createPreview(imageData, i);
                 };
+
+
             };
 
         };
@@ -1589,68 +1599,72 @@ define(function (require) {
 
         this._createPreview = function(imageUrl, order) {
             var img = new Image();
-            img.src = imageUrl;
-            bitmap = new createjs.Bitmap(img);
-            bitmap.setBounds(0, 0, img.width, img.height);
-            bitmap._order = order;
-            // calculate scale
-            var scale_x = this._previewWidth / img.width;
-            var scale_y = this._height / img.height;
-            var scale = Math.min(scale_x, scale_y);
+			var that = this;
+			img.addEventListener("load", function() {
+	            bitmap = new createjs.Bitmap(this);
+	            bitmap.setBounds(0, 0, this.width, this.height);
+	            bitmap._order = order;
+	            // calculate scale
+	            var scale_x = that._previewWidth / this.width;
+	            var scale_y = that._height / this.height;
+	            var scale = Math.min(scale_x, scale_y);
 
-            bitmap.x = this._previewWidth * order;
-            bitmap.y = 0;
-            bitmap.scaleX = scale;
-            bitmap.scaleY = scale;
+	            bitmap.x = that._previewWidth * order;
+	            bitmap.y = LINE_WIDTH;
+	            bitmap.scaleX = scale;
+	            bitmap.scaleY = scale;
 
-            var hitArea = new createjs.Shape();
-            hitArea.graphics.beginFill("#000").drawRect(
-                0, 0, img.width, img.height);
-            bitmap.hitArea = hitArea;
+	            var hitArea = new createjs.Shape();
+	            hitArea.graphics.beginFill("#000").drawRect(
+	                0, 0, this.width, this.height);
+	            bitmap.hitArea = hitArea;
 
-            // don't move first box
-            if (order > 0) {
-                this._previewBitmaps.push(bitmap);
+	            // don't move first box
+	            if (order > 0) {
+	                that._previewBitmaps.push(bitmap);
 
-                bitmap.on('pressmove', function(event) {
-                    console.log('TOON pressmove');
-                    if (this._deltaX == null) {
-                        this._deltaX = event.stageX - event.target.x;
-                        // move the bitmap to the top
-                        var thisBitmap = event.target;
-                        this.stage.sortChildren(function (bitmapA, bitmapB) {
-                            if (bitmapA == thisBitmap) {
-                                return 1;
-                            } else {
-                                return 0;
-                            };});
-                    };
+	                bitmap.on('pressmove', function(event) {
+	                    console.log('TOON pressmove');
+	                    if (that._deltaX == null) {
+	                        that._deltaX = event.stageX - event.target.x;
+	                        // move the bitmap to the top
+	                        var thisBitmap = event.target;
+	                        that.stage.sortChildren(function (bitmapA, bitmapB) {
+	                            if (bitmapA == thisBitmap) {
+	                                return 1;
+	                            } else {
+	                                return 0;
+	                            };});
+	                    };
 
-                    new_x = event.stageX - this._deltaX;
-                    if (new_x > this._previewWidth / 2) {
-                        event.target.x = new_x;
-                        this.stage.update();
-                    };
-                }, this);
+	                    new_x = event.stageX - that._deltaX;
+	                    if (new_x > this._previewWidth / 2) {
+	                        event.target.x = new_x;
+	                        that.stage.update();
+	                    };
+	                }, that);
 
-                bitmap.on('pressup', function(event) {
-                    console.log('TOON pressup');
-                    this._deltaX = null;
-                    // sort the preview bitmaps
-                    this._previewBitmaps.sort(function (bitmapA, bitmapB) {
-                        return bitmapA.x - bitmapB.x;});
-                    // adjust the positions
-                    for (var i = 0; i < this._previewBitmaps.length; i++) {
-                        this._previewBitmaps[i].x = this._previewWidth * (i + 1);
-                    };
-                    this.stage.update();
-                }, this);
+	                bitmap.on('pressup', function(event) {
+	                    console.log('TOON pressup');
+	                    that._deltaX = null;
+	                    // sort the preview bitmaps
+	                    that._previewBitmaps.sort(function (bitmapA, bitmapB) {
+	                        return bitmapA.x - bitmapB.x;});
+	                    // adjust the positions
+	                    for (var i = 0; i < that._previewBitmaps.length; i++) {
+	                        that._previewBitmaps[i].x = that._previewWidth * (i + 1);
+	                    };
+	                    that.stage.update();
+	                }, that);
 
-            };
+	            };
 
-            this.stage.addChild(bitmap);
+	            that.stage.addChildAt(bitmap, 0);
+				that.stage.update();
 
-        };
+        	});
+			img.src = imageUrl;
+		}
 
     };
 
@@ -1664,6 +1678,3 @@ define(function (require) {
 
     return toon;
 });
-
-
-
